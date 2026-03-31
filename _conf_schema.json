@@ -16,10 +16,10 @@
     "type": "template_list",
     "hint": "各个会话（群聊/私聊）的监控配置。可通过 /添加监控 自动生成，也可在此手动添加/编辑。",
     "default": [],
-    "template_schema": {
+    "templates": {
       "session_config": {
         "name": "会话配置",
-        "keys": {
+        "items": {
           "session_id": {
             "name": "会话ID",
             "description": "会话标识（群聊/私聊），格式为 UMO，例如：default:GroupMessage:123456",
