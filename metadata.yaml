@@ -1,4 +1,4 @@
-name: astrbot_plugin_bilibiliobs
+name: astrbot_plugin_bilibililive
 desc: B站UP主开播监测插件，支持添加监控UP主并在开播时发送通知。
 version: 1.0.0
 author: Wine-Red

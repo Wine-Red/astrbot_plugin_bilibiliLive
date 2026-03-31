@@ -13,10 +13,16 @@
   },
   "sessions": {
     "description": "会话监控配置",
-    "type": "dict",
-    "hint": "各个会话（群聊/私聊）的监控配置，键为会话ID（可通过 /添加监控 自动生成，也可手动配置）。",
-    "default": {},
+    "type": "template_list",
+    "hint": "各个会话（群聊/私聊）的监控配置。可通过 /添加监控 自动生成，也可在此手动添加/编辑。",
+    "default": [],
     "template_schema": {
+      "session_id": {
+        "name": "会话ID",
+        "description": "会话标识（群聊/私聊），通常来自 event.unified_msg_origin",
+        "type": "string",
+        "default": ""
+      },
       "uids": {
         "name": "监控的UID列表",
         "description": "该会话下监控的B站UP主UID",
@@ -25,7 +31,7 @@
       },
       "enable_notifications": {
         "name": "开启开播通知",
-        "description": "是否启用开播通知",
+        "description": "是否启用该会话的通知总开关（开播/关播均受影响）",
         "type": "bool",
         "default": true
       },

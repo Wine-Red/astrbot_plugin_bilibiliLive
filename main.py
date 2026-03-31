@@ -4,7 +4,7 @@ import json
 import os
 import time
 from typing import Dict, Set
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
@@ -13,8 +13,8 @@ class BiliLiveNoticePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
         self.config = config or {}
-        self.check_interval = int(self.config.get("check_interval", 60)) if isinstance(self.config, dict) else 60
-        self.max_monitors = int(self.config.get("max_monitors", 50)) if isinstance(self.config, dict) else 50
+        self.check_interval = int(self.config.get("check_interval", 60))
+        self.max_monitors = int(self.config.get("max_monitors", 50))
         
         self.live_status_cache: Dict[str, int] = {}  # 缓存直播状态
         self.live_start_times: Dict[str, float] = {} # 记录开播时间
@@ -95,15 +95,25 @@ class BiliLiveNoticePlugin(Star):
                 logger.error(f"保存配置失败: {e}")
         self.save_state()
 
+    def _get_sessions_list(self) -> list:
+        sessions = self.config.get("sessions", [])
+        if isinstance(sessions, list):
+            return sessions
+        try:
+            self.config["sessions"] = []
+        except Exception:
+            pass
+        return []
+
     def get_all_monitored_uids(self) -> Set[str]:
         uids = set()
-        sessions = self.config.get("sessions", {})
-        if isinstance(sessions, dict):
-            for session_config in sessions.values():
-                if isinstance(session_config, dict):
-                    session_uids = session_config.get("uids", [])
-                    if isinstance(session_uids, list):
-                        uids.update([str(u) for u in session_uids])
+        sessions = self._get_sessions_list()
+        for session_config in sessions:
+            if not isinstance(session_config, dict):
+                continue
+            session_uids = session_config.get("uids", [])
+            if isinstance(session_uids, list):
+                uids.update([str(u) for u in session_uids])
         return uids
 
     async def get_live_status(self, uid: str) -> Dict:
@@ -181,9 +191,7 @@ class BiliLiveNoticePlugin(Star):
                     status_map.update(batch_result)
                 
                 # 获取当前所有会话配置
-                sessions = self.config.get("sessions", {})
-                if not isinstance(sessions, dict):
-                    sessions = {}
+                sessions = self._get_sessions_list()
                 
                 for uid in uids_to_query:
                     current_status = status_map.get(uid, {})
@@ -229,17 +237,20 @@ class BiliLiveNoticePlugin(Star):
                 else:
                     await asyncio.sleep(self.current_interval)
 
-    async def broadcast_event(self, uid: str, status_info: Dict, sessions: Dict, event_type: str):
+    async def broadcast_event(self, uid: str, status_info: Dict, sessions: list, event_type: str):
         uname = status_info.get("uname", "未知UP主")
         title = status_info.get("title", "无标题")
         room_id = status_info.get("room_id", 0)
         area_name = status_info.get("area_name", "未知")
         cover_url = status_info.get("cover_from_user") or status_info.get("keyframe") or ""
         
-        for session_id, session_config in sessions.items():
+        for session_config in sessions:
             if not isinstance(session_config, dict):
                 continue
-            session_uids = [str(u) for u in session_config.get("uids", [])]
+            session_id = str(session_config.get("session_id", "")).strip()
+            if not session_id:
+                continue
+            session_uids = [str(u) for u in session_config.get("uids", []) if str(u).strip()]
             if uid not in session_uids:
                 continue
             
@@ -251,7 +262,11 @@ class BiliLiveNoticePlugin(Star):
                     chain.message(f"标题: {title}\n分区: {area_name}\n直播间: https://live.bilibili.com/{room_id}")
                     await self.context.send_message(session_id, chain)
                 
-                elif event_type == "end" and session_config.get("enable_end_notifications", True):
+                elif (
+                    event_type == "end"
+                    and session_config.get("enable_notifications", True)
+                    and session_config.get("enable_end_notifications", True)
+                ):
                     start_time = self.live_start_times.get(uid, 0)
                     duration_str = "未知"
                     if start_time > 0:
@@ -273,16 +288,31 @@ class BiliLiveNoticePlugin(Star):
                 logger.error(f"发送通知失败 (会话: {session_id}, UP主: {uname}): {e}")
 
     def get_session_config(self, session_id: str) -> Dict:
-        if not isinstance(self.config.get("sessions"), dict):
-            self.config["sessions"] = {}
-        sessions = self.config["sessions"]
-        if session_id not in sessions or not isinstance(sessions[session_id], dict):
-            sessions[session_id] = {
-                "uids": [],
-                "enable_notifications": True,
-                "enable_end_notifications": True
-            }
-        return sessions[session_id]
+        session_id = str(session_id).strip()
+        sessions = self._get_sessions_list()
+        for session_config in sessions:
+            if not isinstance(session_config, dict):
+                continue
+            if str(session_config.get("session_id", "")).strip() == session_id:
+                session_config.setdefault("uids", [])
+                if not isinstance(session_config.get("uids"), list):
+                    session_config["uids"] = []
+                session_config.setdefault("enable_notifications", True)
+                session_config.setdefault("enable_end_notifications", True)
+                return session_config
+
+        new_session_config = {
+            "session_id": session_id,
+            "uids": [],
+            "enable_notifications": True,
+            "enable_end_notifications": True,
+        }
+        sessions.append(new_session_config)
+        try:
+            self.config["sessions"] = sessions
+        except Exception:
+            pass
+        return new_session_config
 
     def cleanup_unmonitored_uids(self):
         all_uids = self.get_all_monitored_uids()
@@ -324,7 +354,7 @@ class BiliLiveNoticePlugin(Star):
             
         if "uids" not in session_config:
             session_config["uids"] = []
-        session_config["uids"].append(uid)
+        session_config["uids"].append(str(uid))
         
         self.live_status_cache[uid] = status_info.get("live_status", 0)
         if status_info.get("live_status") == 1:
@@ -347,10 +377,7 @@ class BiliLiveNoticePlugin(Star):
         
         uids = [str(u) for u in session_config.get("uids", [])]
         if uid in uids:
-            if uid in session_config["uids"]:
-                session_config["uids"].remove(uid)
-            elif int(uid) in session_config["uids"]:
-                session_config["uids"].remove(int(uid))
+            session_config["uids"] = [str(u) for u in session_config.get("uids", []) if str(u) != str(uid)]
             
             self.cleanup_unmonitored_uids()
             self.save_config()
@@ -408,8 +435,7 @@ class BiliLiveNoticePlugin(Star):
     @filter.command("插件状态")
     async def plugin_status(self, event: AstrMessageEvent):
         all_uids = self.get_all_monitored_uids()
-        sessions = self.config.get("sessions", {})
-        sessions_count = len(sessions) if isinstance(sessions, dict) else 0
+        sessions_count = len(self._get_sessions_list())
         
         message = "🔧 插件运行状态:\n"
         message += f"• HTTP会话: {'✅ 正常' if self.session and not self.session.closed else '❌ 异常'}\n"
@@ -423,14 +449,14 @@ class BiliLiveNoticePlugin(Star):
         session_config = self.get_session_config(event.unified_msg_origin)
         session_config["enable_notifications"] = True
         self.save_config()
-        yield event.plain_result("✅ 当前会话已开启开播通知")
+        yield event.plain_result("✅ 当前会话已开启开播与关播通知")
 
     @filter.command("关闭通知")
     async def disable_notify_cmd(self, event: AstrMessageEvent):
         session_config = self.get_session_config(event.unified_msg_origin)
         session_config["enable_notifications"] = False
         self.save_config()
-        yield event.plain_result("✅ 当前会话已关闭开播通知")
+        yield event.plain_result("✅ 当前会话已关闭所有通知")
 
     @filter.command("开启关播通知")
     async def enable_end_notify_cmd(self, event: AstrMessageEvent):
