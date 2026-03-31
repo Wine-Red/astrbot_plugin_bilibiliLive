@@ -6,21 +6,35 @@
     "default": 60
   },
   "max_monitors": {
-    "description": "最大监控UP主数量",
+    "description": "每个会话最大监控UP主数量",
     "type": "int", 
-    "hint": "限制同时监控的UP主数量，避免API请求过于频繁",
+    "hint": "限制每个会话同时监控的UP主数量，避免API请求过于频繁",
     "default": 50
   },
-  "enable_notifications": {
-    "description": "是否启用开播通知",
-    "type": "bool",
-    "hint": "开启后会在UP主开播时发送通知消息",
-    "default": true
-  },
-  "enable_end_notifications": {
-    "description": "是否启用关播通知",
-    "type": "bool",
-    "hint": "开启后会在UP主结束直播时发送通知消息",
-    "default": true
+  "sessions": {
+    "description": "会话监控配置",
+    "type": "dict",
+    "hint": "各个会话（群聊/私聊）的监控配置，键为会话ID（可通过 /添加监控 自动生成，也可手动配置）。",
+    "default": {},
+    "template_schema": {
+      "uids": {
+        "name": "监控的UID列表",
+        "description": "该会话下监控的B站UP主UID",
+        "type": "list",
+        "default": []
+      },
+      "enable_notifications": {
+        "name": "开启开播通知",
+        "description": "是否启用开播通知",
+        "type": "bool",
+        "default": true
+      },
+      "enable_end_notifications": {
+        "name": "开启关播通知",
+        "description": "是否启用关播通知",
+        "type": "bool",
+        "default": true
+      }
+    }
   }
 }
