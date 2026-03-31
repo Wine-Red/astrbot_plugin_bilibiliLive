@@ -8,7 +8,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
 
-@register("bili_live_notice", "Wine-Red", "B站UP主开播监测插件", "1.0.0", "https://github.com/Wine-Red/astrbot_plugin_bilibiliLive")
+@register("bili_live_notice", "Wine-Red", "B站UP主开播监测插件", "1.1.0", "https://github.com/Wine-Red/astrbot_plugin_bilibiliLive")
 class BiliLiveNoticePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
         super().__init__(context)
@@ -200,13 +200,21 @@ class BiliLiveNoticePlugin(Star):
                     
                     if live_status == 1 and previous_status != 1:
                         self.live_start_times[uid] = now
+                        self.live_status_cache[uid] = live_status
                         await self.broadcast_event(uid, current_status, sessions, event_type="live")
                     
-                    if previous_status == 1 and live_status != 1:
-                        await self.broadcast_event(uid, current_status, sessions, event_type="end")
+                    elif previous_status == 1 and live_status != 1:
                         self.live_start_times.pop(uid, None)
-                    
-                    self.live_status_cache[uid] = live_status
+                        self.live_status_cache[uid] = live_status
+                        await self.broadcast_event(uid, current_status, sessions, event_type="end")
+                        
+                    elif live_status == 1 and previous_status == 1:
+                        # 状态未改变，仅更新缓存避免异常回退
+                        self.live_status_cache[uid] = live_status
+                        
+                    elif live_status != 1 and previous_status != 1:
+                        # 状态未改变
+                        self.live_status_cache[uid] = live_status
                     
                     is_empty = (not current_status.get("uname")) and current_status.get("room_id", 0) == 0
                     if is_empty:
