@@ -107,13 +107,13 @@ class BiliLiveNoticePlugin(Star):
 
     def get_all_monitored_uids(self) -> Set[str]:
         uids = set()
-        sessions = self._get_sessions_list()
-        for session_config in sessions:
-            if not isinstance(session_config, dict):
-                continue
-            session_uids = session_config.get("uids", [])
-            if isinstance(session_uids, list):
-                uids.update([str(u) for u in session_uids])
+        sessions = self.config.get("sessions", [])
+        if isinstance(sessions, list):
+            for session_config in sessions:
+                if isinstance(session_config, dict):
+                    session_uids = session_config.get("uids", [])
+                    if isinstance(session_uids, list):
+                        uids.update([str(u) for u in session_uids])
         return uids
 
     async def get_live_status(self, uid: str) -> Dict:
@@ -190,7 +190,7 @@ class BiliLiveNoticePlugin(Star):
                     batch_result = await self.get_live_status_batch(batch)
                     status_map.update(batch_result)
                 
-                # 获取当前所有会话配置
+                # 获取当前所有会话配置 (列表)
                 sessions = self._get_sessions_list()
                 
                 for uid in uids_to_query:
@@ -247,8 +247,12 @@ class BiliLiveNoticePlugin(Star):
         for session_config in sessions:
             if not isinstance(session_config, dict):
                 continue
-            session_id = str(session_config.get("session_id", "")).strip()
+            session_id = session_config.get("session_id")
             if not session_id:
+                continue
+                
+            session_uids = [str(u) for u in session_config.get("uids", [])]
+            if uid not in session_uids:
                 continue
             session_uids = [str(u) for u in session_config.get("uids", []) if str(u).strip()]
             if uid not in session_uids:
@@ -288,31 +292,23 @@ class BiliLiveNoticePlugin(Star):
                 logger.error(f"发送通知失败 (会话: {session_id}, UP主: {uname}): {e}")
 
     def get_session_config(self, session_id: str) -> Dict:
-        session_id = str(session_id).strip()
-        sessions = self._get_sessions_list()
+        if not isinstance(self.config.get("sessions"), list):
+            self.config["sessions"] = []
+        sessions = self.config["sessions"]
+        
         for session_config in sessions:
-            if not isinstance(session_config, dict):
-                continue
-            if str(session_config.get("session_id", "")).strip() == session_id:
-                session_config.setdefault("uids", [])
-                if not isinstance(session_config.get("uids"), list):
-                    session_config["uids"] = []
-                session_config.setdefault("enable_notifications", True)
-                session_config.setdefault("enable_end_notifications", True)
+            if isinstance(session_config, dict) and session_config.get("session_id") == session_id:
                 return session_config
-
-        new_session_config = {
+                
+        # If not found, create new one
+        new_config = {
             "session_id": session_id,
             "uids": [],
             "enable_notifications": True,
-            "enable_end_notifications": True,
+            "enable_end_notifications": True
         }
-        sessions.append(new_session_config)
-        try:
-            self.config["sessions"] = sessions
-        except Exception:
-            pass
-        return new_session_config
+        sessions.append(new_config)
+        return new_config
 
     def cleanup_unmonitored_uids(self):
         all_uids = self.get_all_monitored_uids()
@@ -435,7 +431,8 @@ class BiliLiveNoticePlugin(Star):
     @filter.command("插件状态")
     async def plugin_status(self, event: AstrMessageEvent):
         all_uids = self.get_all_monitored_uids()
-        sessions_count = len(self._get_sessions_list())
+        sessions = self.config.get("sessions", [])
+        sessions_count = len(sessions) if isinstance(sessions, list) else 0
         
         message = "🔧 插件运行状态:\n"
         message += f"• HTTP会话: {'✅ 正常' if self.session and not self.session.closed else '❌ 异常'}\n"
