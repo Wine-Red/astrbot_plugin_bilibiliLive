@@ -1,0 +1,101 @@
+{
+  "check_interval": {
+    "name": "检查间隔",
+    "description": "监控检查间隔（秒）",
+    "type": "int",
+    "hint": "设置轮询 B 站直播状态的间隔。建议保持在 30 到 300 秒之间，过小可能增加请求频率。",
+    "default": 60
+  },
+  "max_monitors": {
+    "name": "单会话监控上限",
+    "description": "每个会话最大监控UP主数量",
+    "type": "int",
+    "hint": "限制单个群聊或私聊可同时监控的 UID 数量，避免请求过于频繁。",
+    "default": 50
+  },
+  "sessions": {
+    "name": "会话配置",
+    "description": "会话监控配置",
+    "type": "template_list",
+    "hint": "用于管理各个群聊或私聊的监控列表和通知开关。请直接在插件配置中维护该列表。",
+    "default": [],
+    "templates": {
+      "session_config": {
+        "name": "会话配置",
+        "hint": "请在插件配置中手动维护。编辑时请确保 session_id 与 UID 列表填写正确。",
+        "items": {
+          "session_id": {
+            "name": "会话ID",
+            "description": "会话标识（群聊/私聊），格式为 UMO，例如：default:GroupMessage:123456",
+            "type": "string",
+            "hint": "需要手动填写目标会话的 UMO 标识，例如群聊或私聊的统一消息来源标识。",
+            "default": ""
+          },
+          "uids": {
+            "name": "监控UID列表",
+            "description": "该会话下监控的 B 站 UP 主 UID 列表。",
+            "type": "list",
+            "hint": "这是列表类型，每一项填写一个纯数字 UID，不需要写成逗号分隔的字符串。",
+            "default": []
+          },
+          "enable_notifications": {
+            "name": "通知总开关",
+            "description": "是否启用该会话的所有直播通知。",
+            "type": "bool",
+            "hint": "关闭后，该会话将不会收到开播通知和关播通知。",
+            "default": true
+          },
+          "enable_end_notifications": {
+            "name": "关播通知",
+            "description": "是否在主播下播时发送通知。",
+            "type": "bool",
+            "hint": "仅在“通知总开关”开启时生效。",
+            "default": true
+          },
+          "enable_title_change_notifications": {
+            "name": "标题变更通知",
+            "description": "是否在主播直播中修改标题时发送通知。",
+            "type": "bool",
+            "hint": "仅在“通知总开关”开启时生效。适合关注直播主题变化。",
+            "default": true
+          },
+          "enable_cover_change_notifications": {
+            "name": "封面变更通知",
+            "description": "是否在主播直播中更换封面时发送通知。",
+            "type": "bool",
+            "hint": "仅在“通知总开关”开启时生效。为减少误报，仅比较较稳定的封面字段。",
+            "default": false
+          },
+          "enable_area_change_notifications": {
+            "name": "分区变更通知",
+            "description": "是否在主播直播中切换分区时发送通知。",
+            "type": "bool",
+            "hint": "仅在“通知总开关”开启时生效。适合关注聊天、游戏等分区切换。",
+            "default": true
+          },
+          "enable_offline_title_change_notifications": {
+            "name": "关播标题变更通知",
+            "description": "是否在主播未开播时修改标题时发送通知。",
+            "type": "bool",
+            "hint": "适合关注直播预告标题变化。仅在“通知总开关”开启时生效。",
+            "default": false
+          },
+          "enable_offline_cover_change_notifications": {
+            "name": "关播封面变更通知",
+            "description": "是否在主播未开播时更换封面时发送通知。",
+            "type": "bool",
+            "hint": "默认关闭以减少噪音。仅在“通知总开关”开启时生效。",
+            "default": false
+          },
+          "enable_offline_area_change_notifications": {
+            "name": "关播分区变更通知",
+            "description": "是否在主播未开播时切换分区时发送通知。",
+            "type": "bool",
+            "hint": "适合关注直播预告分区调整。仅在“通知总开关”开启时生效。",
+            "default": false
+          }
+        }
+      }
+    }
+  }
+}

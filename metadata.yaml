@@ -1,0 +1,9 @@
+name: astrbot_plugin_bilibililive
+display_name: B站直播推送工具
+desc: 监控 B 站 UP 主直播状态，并在开播、关播或直播内外的信息变更时向当前会话发送通知。
+version: 1.0.0
+author: WineRed
+repo: https://github.com/Wine-Red/astrbot_plugin_bilibiliLive
+main_file: main.py
+requirements:
+  - aiohttp>=3.8.0
