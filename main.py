@@ -46,6 +46,7 @@ class BiliLiveNoticePlugin(Star):
         self.live_meta_cache: Dict[str, Dict[str, str]] = {}  # 记录最近一次抓取到的标题/封面/分区
         self.ws_clients: Dict[str, DanmakuClient] = {}  # UID -> 弹幕统计客户端
         self.stats_map: Dict[str, LiveStats] = {}       # UID -> 本场实时统计
+        self._stats_init_done: Set[str] = set()  # 已完成高能榜初始化的 UID（每场直播一次）
         self.uid_error_counts: Dict[str, int] = {}
         self.uid_skip_until: Dict[str, float] = {}
         self.online_query_skip_until = 0.0
@@ -414,11 +415,14 @@ class BiliLiveNoticePlugin(Star):
         return self.stats_map.pop(uid, None)
 
     async def _init_live_stats(self, uid: str, status_info: Dict):
-        """开播时用高能榜接口补齐开播前的历史收入与当前同接。
+        """用高能榜接口补齐开播前（连接建立前）的历史收入与当前同接。
 
         弹幕连接建立前的礼物/舰长/SC 不会通过事件到达，用高能榜贡献值
-        初始化（贡献值 ÷10 折合为元，与实时事件同口径）。
+        初始化（贡献值 ÷10 折合为元，与实时事件同口径）。每场直播只执行
+        一次；重启后直播仍在进行时也会补齐。同接为当前瞬时值，初始化时
+        一并更新峰值，避免峰值仅从连接建立后起算。
         """
+        self._stats_init_done.add(uid)
         client = self.ws_clients.get(uid)
         if client is None:
             return
@@ -431,6 +435,8 @@ class BiliLiveNoticePlugin(Star):
             online = await get_online_num(self.session, room_id, ruid)
             if online:
                 client.stats.online = online
+                if online > client.stats.peak_online:
+                    client.stats.peak_online = online
             if client.stats.total_amount <= 0:  # 避免覆盖已恢复的统计
                 client.stats.total_amount = await get_gongxian_amount(
                     self.session, room_id, ruid
@@ -485,6 +491,7 @@ class BiliLiveNoticePlugin(Star):
                         self.live_status_cache[uid] = live_status
                         await self.broadcast_event(uid, current_status, sessions, event_type="live")
                         self.stats_map.pop(uid, None)  # 新一场直播，重置本场实时统计
+                        self._stats_init_done.discard(uid)  # 新直播需重新初始化
                         await self._ensure_stats_client(uid, current_status)
                         # 用高能榜接口补齐开播前（连接建立前）的历史收入与当前同接
                         await self._init_live_stats(uid, current_status)
@@ -516,6 +523,10 @@ class BiliLiveNoticePlugin(Star):
                         self.live_meta_cache[uid] = current_meta
                         # 直播仍在进行：确保实时统计通道存在（重启后可恢复）
                         await self._ensure_stats_client(uid, current_status)
+                        # 重启/更新插件后直播仍在进行时，补一次高能榜初始化，
+                        # 避免本场收入与同接从头开始累计
+                        if uid not in self._stats_init_done:
+                            await self._init_live_stats(uid, current_status)
                         
                     elif live_status != 1 and previous_status != 1:
                         # 关播状态下仍可检测标题、封面、分区等资料变更
@@ -630,10 +641,11 @@ class BiliLiveNoticePlugin(Star):
                     chain = MessageChain().message(f"⚫ {uname} 已结束直播\n")
                     if cover_url:
                         chain.url_image(cover_url)
-                    chain.message(f"直播时长: {duration_str}")
+                    text = f"直播时长: {duration_str}"
                     stats_lines = self._format_live_stats_lines(live_stats)
                     if stats_lines:
-                        chain.message(stats_lines)
+                        text += f"\n{stats_lines}"
+                    chain.message(text)
                     await self.context.send_message(session_id, chain)
 
                 elif (
