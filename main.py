@@ -16,6 +16,21 @@ try:
 except Exception:  # pragma: no cover - 兼容旧版 AstrBot
     get_astrbot_data_path = None
 
+try:
+    from .danmaku_client import (
+        DanmakuClient,
+        LiveStats,
+        get_gongxian_amount,
+        get_online_num,
+    )
+except ImportError:  # pragma: no cover - 兼容以单文件方式加载插件
+    from danmaku_client import (
+        DanmakuClient,
+        LiveStats,
+        get_gongxian_amount,
+        get_online_num,
+    )
+
 @register("bili_live_notice", "Wine-Red", "监控 B 站 UP 主直播状态，并在开播、关播或直播信息变更时向当前会话发送通知。", "1.0.0", "https://github.com/Wine-Red/astrbot_plugin_bilibiliLive")
 class BiliLiveNoticePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -23,11 +38,14 @@ class BiliLiveNoticePlugin(Star):
         self.config = config or {}
         self.check_interval = int(self.config.get("check_interval", 60))
         self.max_monitors = int(self.config.get("max_monitors", 50))
+        self.enable_live_stats = bool(self.config.get("enable_live_stats", True))
+        self.max_stats_connections = int(self.config.get("max_stats_connections", 20))
         
         self.live_status_cache: Dict[str, int] = {}  # 缓存直播状态
         self.live_start_times: Dict[str, float] = {} # 记录开播时间
         self.live_meta_cache: Dict[str, Dict[str, str]] = {}  # 记录最近一次抓取到的标题/封面/分区
-        self.live_peak_online: Dict[str, int] = {}  # 记录本场人气值峰值
+        self.ws_clients: Dict[str, DanmakuClient] = {}  # UID -> 弹幕统计客户端
+        self.stats_map: Dict[str, LiveStats] = {}       # UID -> 本场实时统计
         self.uid_error_counts: Dict[str, int] = {}
         self.uid_skip_until: Dict[str, float] = {}
         self.online_query_skip_until = 0.0
@@ -213,7 +231,13 @@ class BiliLiveNoticePlugin(Star):
                     self.live_status_cache = data.get('live_status_cache', {})
                     self.live_start_times = data.get('live_start_times', {})
                     self.live_meta_cache = data.get('live_meta_cache', {})
-                    self.live_peak_online = data.get('live_peak_online', {})
+                    # 恢复本场实时统计（重启后直播仍在进行时可继续累计）
+                    for uid, stats_data in (data.get('live_stats') or {}).items():
+                        if isinstance(stats_data, dict):
+                            try:
+                                self.stats_map[str(uid)] = LiveStats.from_dict(stats_data)
+                            except Exception:
+                                continue
         except Exception as e:
             logger.error(f"加载状态文件失败: {e}")
 
@@ -223,7 +247,7 @@ class BiliLiveNoticePlugin(Star):
                 'live_status_cache': self.live_status_cache,
                 'live_start_times': self.live_start_times,
                 'live_meta_cache': self.live_meta_cache,
-                'live_peak_online': self.live_peak_online,
+                'live_stats': {uid: stats.to_dict() for uid, stats in self.stats_map.items()},
             }
             with self.state_file.open('w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -356,6 +380,64 @@ class BiliLiveNoticePlugin(Star):
             logger.error(f"获取直播间 {room_id} 人气值失败: {e}")
         return None
 
+    async def _ensure_stats_client(self, uid: str, status_info: Dict):
+        """为直播中的 UP 主启动（或复用）弹幕统计客户端。"""
+        if not self.enable_live_stats:
+            return
+        client = self.ws_clients.get(uid)
+        if client is not None and client.task is not None and not client.task.done():
+            return
+        if len(self.ws_clients) >= self.max_stats_connections:
+            logger.warning(
+                f"实时统计连接数已达上限 {self.max_stats_connections}，"
+                f"跳过 UID {uid}（HTTP 轮询仍生效）"
+            )
+            return
+        room_id = int(status_info.get("room_id", 0) or 0)
+        if not room_id:
+            return
+        uname = status_info.get("uname", "未知UP主")
+        stats = self.stats_map.get(uid) or LiveStats(
+            uid=str(uid), room_id=room_id, uname=uname
+        )
+        client = DanmakuClient(str(uid), room_id, uname=uname, stats=stats)
+        self.ws_clients[str(uid)] = client
+        self.stats_map[str(uid)] = client.stats
+        client.start()
+        logger.info(f"已为 UID {uid}（{uname}）启动实时统计连接")
+
+    async def _stop_stats_client(self, uid: str) -> Optional[LiveStats]:
+        """停止弹幕统计客户端并返回本场统计（用于关播报告）。"""
+        client = self.ws_clients.pop(uid, None)
+        if client is not None:
+            await client.stop()
+        return self.stats_map.pop(uid, None)
+
+    async def _init_live_stats(self, uid: str, status_info: Dict):
+        """开播时用高能榜接口补齐开播前的历史收入与当前同接。
+
+        弹幕连接建立前的礼物/舰长/SC 不会通过事件到达，用高能榜贡献值
+        初始化（贡献值 ÷10 折合为元，与实时事件同口径）。
+        """
+        client = self.ws_clients.get(uid)
+        if client is None:
+            return
+        room_id = int(status_info.get("room_id", 0) or 0)
+        ruid = int(status_info.get("uid") or status_info.get("mid") or 0)
+        if not room_id or not ruid:
+            return
+        try:
+            await self.ensure_session()
+            online = await get_online_num(self.session, room_id, ruid)
+            if online:
+                client.stats.online = online
+            if client.stats.total_amount <= 0:  # 避免覆盖已恢复的统计
+                client.stats.total_amount = await get_gongxian_amount(
+                    self.session, room_id, ruid
+                )
+        except Exception as e:
+            logger.error(f"初始化 UID {uid} 直播统计失败: {e}")
+
     async def monitor_live_status(self):
         consecutive_errors = 0
         max_consecutive_errors = 5
@@ -401,14 +483,15 @@ class BiliLiveNoticePlugin(Star):
                         self.live_start_times[uid] = self._extract_live_start_time(current_status) or now
                         self.live_meta_cache[uid] = current_meta
                         self.live_status_cache[uid] = live_status
-                        online = await self.get_room_online(room_id)
-                        if online is not None:
-                            self.live_peak_online[uid] = online
                         await self.broadcast_event(uid, current_status, sessions, event_type="live")
+                        self.stats_map.pop(uid, None)  # 新一场直播，重置本场实时统计
+                        await self._ensure_stats_client(uid, current_status)
+                        # 用高能榜接口补齐开播前（连接建立前）的历史收入与当前同接
+                        await self._init_live_stats(uid, current_status)
                     
                     elif previous_status == 1 and live_status != 1:
                         live_start_time = self.live_start_times.pop(uid, None)
-                        peak_online = self.live_peak_online.pop(uid, None)
+                        live_stats = await self._stop_stats_client(uid)
                         self.live_meta_cache[uid] = current_meta
                         self.live_status_cache[uid] = live_status
                         await self.broadcast_event(
@@ -417,7 +500,7 @@ class BiliLiveNoticePlugin(Star):
                             sessions,
                             event_type="end",
                             live_start_time=live_start_time,
-                            peak_online=peak_online,
+                            live_stats=live_stats,
                         )
                         
                     elif live_status == 1 and previous_status == 1:
@@ -431,9 +514,8 @@ class BiliLiveNoticePlugin(Star):
                                 uid, current_status, sessions, previous_meta, current_meta, is_live=True
                             )
                         self.live_meta_cache[uid] = current_meta
-                        online = await self.get_room_online(room_id)
-                        if online is not None:
-                            self.live_peak_online[uid] = max(self.live_peak_online.get(uid, 0), online)
+                        # 直播仍在进行：确保实时统计通道存在（重启后可恢复）
+                        await self._ensure_stats_client(uid, current_status)
                         
                     elif live_status != 1 and previous_status != 1:
                         # 关播状态下仍可检测标题、封面、分区等资料变更
@@ -444,6 +526,13 @@ class BiliLiveNoticePlugin(Star):
                                 uid, current_status, sessions, previous_meta, current_meta, is_live=False
                             )
                         self.live_meta_cache[uid] = current_meta
+                
+                # 清理已下播或已移除监控的残留统计
+                for stale_uid in list(self.stats_map):
+                    if stale_uid in self.ws_clients:
+                        continue
+                    if stale_uid not in all_uids or self.live_status_cache.get(stale_uid, 0) != 1:
+                        self.stats_map.pop(stale_uid, None)
                 
                 self.save_state()
                 consecutive_errors = 0
@@ -465,6 +554,19 @@ class BiliLiveNoticePlugin(Star):
                 else:
                     await asyncio.sleep(self.current_interval)
 
+    @staticmethod
+    def _format_live_stats_lines(live_stats: Optional[LiveStats]) -> str:
+        """生成关播通知中的本场统计两行；无有效数据时返回空串。"""
+        if live_stats is None:
+            return ""
+        has_data = live_stats.total_amount > 0 or live_stats.peak_online > 0
+        if not has_data:
+            return ""
+        return (
+            f"本场收入: ¥{live_stats.total_amount:.2f}\n"
+            f"同接峰值: {live_stats.peak_online}"
+        )
+
     async def broadcast_event(
         self,
         uid: str,
@@ -472,9 +574,9 @@ class BiliLiveNoticePlugin(Star):
         sessions: list,
         event_type: str,
         live_start_time: Optional[float] = None,
-        peak_online: Optional[int] = None,
         old_value: Optional[str] = None,
         new_value: Optional[str] = None,
+        live_stats: Optional[LiveStats] = None,
     ):
         uname = status_info.get("uname", "未知UP主")
         title = status_info.get("title", "无标题")
@@ -516,7 +618,6 @@ class BiliLiveNoticePlugin(Star):
                 ):
                     start_time = live_start_time if live_start_time is not None else self.live_start_times.get(uid, 0)
                     duration_str = "未知"
-                    peak_online_str = "未知"
                     if start_time > 0:
                         duration = int(time.time() - start_time)
                         hours = duration // 3600
@@ -525,13 +626,14 @@ class BiliLiveNoticePlugin(Star):
                             duration_str = f"{hours}小时{minutes}分钟"
                         else:
                             duration_str = f"{minutes}分钟"
-                    if isinstance(peak_online, int) and peak_online >= 0:
-                        peak_online_str = str(peak_online)
-                            
+
                     chain = MessageChain().message(f"⚫ {uname} 已结束直播\n")
                     if cover_url:
                         chain.url_image(cover_url)
-                    chain.message(f"直播时长: {duration_str}\n本场人气值: {peak_online_str}")
+                    chain.message(f"直播时长: {duration_str}")
+                    stats_lines = self._format_live_stats_lines(live_stats)
+                    if stats_lines:
+                        chain.message(stats_lines)
                     await self.context.send_message(session_id, chain)
 
                 elif (
@@ -675,6 +777,59 @@ class BiliLiveNoticePlugin(Star):
         else:
             yield event.plain_result(f"⚫ {uname} 当前未开播")
 
+    @filter.command("直播统计")
+    async def query_live_stats(self, event: AstrMessageEvent):
+        """查询直播间的实时流水/弹幕/人气统计。"""
+        args = event.message_str.strip().split()
+        session_config = self.get_session_config(event.unified_msg_origin)
+        uids = [str(u) for u in (session_config or {}).get("uids", [])]
+        if len(args) >= 2 and args[1].strip().isdigit():
+            uids = [args[1].strip()]
+
+        if not uids:
+            yield event.plain_result("❌ 当前会话没有监控任何UP主")
+            return
+
+        lines = []
+        for uid in uids:
+            status_info = await self.get_live_status(uid)
+            uname = status_info.get("uname", "")
+            if not uname:
+                lines.append(f"❌ 未找到UID为 {uid} 的UP主")
+                continue
+            if status_info.get("live_status") != 1:
+                lines.append(f"⚫ {uname}（UID:{uid}）当前未开播")
+                continue
+            client = self.ws_clients.get(uid)
+            stats = self.stats_map.get(uid)
+            room_id = int(status_info.get("room_id", 0) or 0)
+            if client is not None and stats is not None:
+                # 观看人数为真实同接（弹幕通道实时推送），未收到时用高能榜接口兜底
+                online = stats.online
+                if online <= 0:
+                    ruid = int(status_info.get("uid") or status_info.get("mid") or 0)
+                    if room_id and ruid:
+                        try:
+                            await self.ensure_session()
+                            fetched = await get_online_num(self.session, room_id, ruid)
+                            online = fetched or 0
+                        except Exception:
+                            pass
+                conn_state = "实时" if client.connected else "重连中"
+                lines.append(
+                    f"📊 {uname} 直播统计（{conn_state}通道）\n"
+                    f"• 💰 本场收入: ¥{stats.total_amount:.2f}\n"
+                    f"• 👀 实时观看: {online}（峰值 {stats.peak_online}）"
+                )
+            else:
+                online = await self.get_room_online(room_id)
+                online_str = str(online) if online is not None else "未知"
+                lines.append(
+                    f"📊 {uname} 直播统计（未启用实时通道）\n"
+                    f"• 📈 人气: {online_str}"
+                )
+        yield event.plain_result("\n\n".join(lines))
+
     @filter.command("插件状态")
     async def plugin_status(self, event: AstrMessageEvent):
         """显示插件运行状态和当前监控规模。"""
@@ -686,12 +841,19 @@ class BiliLiveNoticePlugin(Star):
         message += f"• HTTP会话: {'✅ 正常' if self.session and not self.session.closed else '❌ 异常'}\n"
         message += f"• 监控任务: {'✅ 运行中' if self.monitor_task and not self.monitor_task.done() else '❌ 已停止'}\n"
         message += f"• 监控配置: 共 {sessions_count} 个会话, {len(all_uids)} 个去重UP主\n"
+        message += (
+            f"• 实时统计: 连接 {len(self.ws_clients)}/{self.max_stats_connections}"
+            + ("（已启用）" if self.enable_live_stats else "（未启用）")
+        )
         
         yield event.plain_result(message)
 
     async def _cleanup_resources(self):
         if self.monitor_task and not self.monitor_task.done():
             self.monitor_task.cancel()
+        for client in list(self.ws_clients.values()):
+            await client.stop()
+        self.ws_clients.clear()
         if self.session and not self.session.closed:
             await self.session.close()
 

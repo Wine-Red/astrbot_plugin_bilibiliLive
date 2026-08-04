@@ -13,6 +13,20 @@
     "hint": "限制单个群聊或私聊可同时监控的 UID 数量，避免请求过于频繁。",
     "default": 50
   },
+  "enable_live_stats": {
+    "name": "实时统计",
+    "description": "是否通过弹幕通道实时统计直播间收入/观看人数。",
+    "type": "bool",
+    "hint": "开启后，直播中的UP主会建立 WebSocket 连接，实时统计本场收入（金瓜子礼物/上舰/SC 全额）与真实观看人数（同接），关播时在通知中附带本场统计。无需登录即可使用。",
+    "default": true
+  },
+  "max_stats_connections": {
+    "name": "实时统计连接上限",
+    "description": "同时建立的弹幕统计WebSocket连接数上限。",
+    "type": "int",
+    "hint": "限制同时为多少个直播中的UP主建立实时统计连接，避免连接过多。超出上限的UP主仅保留HTTP轮询（无法统计收入/同接）。",
+    "default": 20
+  },
   "sessions": {
     "name": "会话配置",
     "description": "会话监控配置",
